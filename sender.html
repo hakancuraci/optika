@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="description" content="Metni OPTX1 biçiminde QR karelerine dönüştürür." />
+<title>Optik Veri Gönderici</title>
+<style>
+  :root {
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+    color-scheme: dark;
+    --bg:#090c12; --panel:#121824; --panel-2:#0d121b; --line:#273247;
+    --text:#f4f7fb; --muted:#9aa7ba; --blue:#4f8cff; --cyan:#50d6e8;
+    --ok:#61d895; --warn:#ffd166; --danger:#ff7b7b;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:radial-gradient(circle at 75% 0,#122540 0,transparent 38%),var(--bg); color:var(--text); }
+  button,input,textarea,select { font:inherit; }
+  .shell { width:min(1180px,100%); margin:auto; padding:18px; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:16px; }
+  .brand { display:flex; align-items:center; gap:12px; }
+  .mark { width:42px; height:42px; display:grid; place-items:center; border:1px solid #40577b; border-radius:13px; background:#142139; color:var(--cyan); font-weight:900; }
+  h1 { margin:0; font-size:clamp(1.25rem,3vw,1.65rem); letter-spacing:-.02em; }
+  .sub { color:var(--muted); font-size:.88rem; margin-top:2px; }
+  .back { color:#b9ceff; text-decoration:none; padding:10px 12px; border:1px solid var(--line); border-radius:11px; white-space:nowrap; }
+  main { display:grid; grid-template-columns:minmax(0,.9fr) minmax(360px,1.1fr); gap:16px; align-items:start; }
+  .card { background:linear-gradient(145deg,rgba(20,27,40,.98),rgba(14,19,29,.98)); border:1px solid var(--line); border-radius:18px; padding:16px; box-shadow:0 18px 60px rgba(0,0,0,.22); }
+  .label { display:block; margin:0 0 7px; color:#cbd5e4; font-size:.9rem; font-weight:700; }
+  textarea,input,select { width:100%; color:var(--text); background:#090e16; border:1px solid #303c51; border-radius:11px; padding:11px 12px; outline:none; }
+  textarea { min-height:230px; resize:vertical; line-height:1.5; }
+  textarea:focus,input:focus,select:focus { border-color:var(--blue); box-shadow:0 0 0 3px rgba(79,140,255,.16); }
+  .field { margin-bottom:13px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:11px; }
+  .hint { color:var(--muted); font-size:.82rem; line-height:1.45; margin:7px 0 0; }
+  .actions { display:flex; flex-wrap:wrap; gap:9px; margin-top:14px; }
+  button { min-height:44px; border:0; border-radius:11px; padding:10px 14px; font-weight:800; cursor:pointer; color:#fff; background:#252f40; }
+  button:hover { filter:brightness(1.08); }
+  button:disabled { cursor:not-allowed; opacity:.46; }
+  .primary { background:linear-gradient(135deg,var(--blue),#6e63ff); }
+  .secondary { border:1px solid #334158; background:#182131; }
+  .qr-card { position:sticky; top:14px; text-align:center; overflow:hidden; }
+  .qr-top { display:flex; align-items:center; justify-content:space-between; gap:12px; text-align:left; margin-bottom:12px; }
+  .eyebrow { color:var(--cyan); text-transform:uppercase; letter-spacing:.12em; font-size:.75rem; font-weight:900; }
+  .counter { font-variant-numeric:tabular-nums; font-weight:900; font-size:1.1rem; }
+  .qr-stage { min-height:420px; display:grid; place-items:center; padding:18px; background:#fff; border-radius:14px; }
+  canvas { display:block; width:min(100%,620px); height:auto; image-rendering:pixelated; }
+  .empty { color:#596579; max-width:300px; line-height:1.5; }
+  .transport { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:9px; margin-top:12px; }
+  .transport button:first-child { justify-self:end; }
+  .transport button:last-child { justify-self:start; }
+  .play { min-width:112px; background:#edf3ff; color:#111827; }
+  .meta { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:12px; }
+  .stat { text-align:left; padding:10px; background:var(--panel-2); border-radius:10px; }
+  .stat small { display:block; color:var(--muted); margin-bottom:3px; }
+  .stat strong { font-size:.95rem; word-break:break-word; }
+  .progress { height:6px; border-radius:99px; background:#202a3a; overflow:hidden; margin-top:11px; }
+  .progress > span { display:block; width:0; height:100%; background:linear-gradient(90deg,var(--blue),var(--cyan)); transition:width .16s linear; }
+  #status { min-height:22px; margin:12px 0 0; color:var(--muted); font-size:.9rem; }
+  #status.ok { color:var(--ok); } #status.err { color:var(--danger); }
+  details { margin-top:12px; text-align:left; }
+  summary { cursor:pointer; color:#aebbd0; font-size:.85rem; }
+  #raw { margin-top:8px; max-height:110px; overflow:auto; padding:9px; background:#080c12; border-radius:8px; color:#8897ad; font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; word-break:break-all; }
+  :fullscreen.qr-card { display:grid; align-content:center; background:#080b10; padding:3vh; }
+  :fullscreen .qr-stage { min-height:70vh; }
+  @media (max-width:820px) {
+    main { grid-template-columns:1fr; }
+    .qr-card { position:static; }
+    .qr-stage { min-height:330px; }
+  }
+  @media (max-width:480px) {
+    .shell { padding:12px; }
+    header { align-items:flex-start; }
+    .sub { display:none; }
+    .grid { grid-template-columns:1fr; }
+    .meta { grid-template-columns:1fr 1fr; }
+    .qr-stage { min-height:290px; padding:10px; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div class="brand">
+      <div class="mark">TX</div>
+      <div><h1>Optik Veri Gönderici</h1><div class="sub">Metni sıralı QR karelerine dönüştürür</div></div>
+    </div>
+    <a class="back" href="index.html">Alıcıya geç</a>
+  </header>
+
+  <main>
+    <section class="card" aria-labelledby="inputTitle">
+      <h2 id="inputTitle" style="font-size:1rem;margin:0 0 14px">Gönderilecek içerik</h2>
+      <div class="field">
+        <label class="label" for="textInput">Metin</label>
+        <textarea id="textInput" placeholder="Göndermek istediğiniz metni buraya yazın…" spellcheck="true"></textarea>
+        <p class="hint"><span id="byteCount">0</span> bayt · Türkçe karakterler UTF-8 olarak korunur.</p>
+      </div>
+      <div class="grid">
+        <div class="field">
+          <label class="label" for="filename">Dosya adı</label>
+          <input id="filename" value="metin.txt" maxlength="80" />
+        </div>
+        <div class="field">
+          <label class="label" for="chunkSize">Parça boyutu</label>
+          <select id="chunkSize">
+            <option value="160">160 bayt · güçlü okuma</option>
+            <option value="240" selected>240 bayt · dengeli</option>
+            <option value="360">360 bayt · hızlı</option>
+            <option value="480">480 bayt · yoğun</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="label" for="fps">Gösterim hızı</label>
+          <select id="fps">
+            <option value="2">2 kare/sn</option>
+            <option value="3">3 kare/sn</option>
+            <option value="4" selected>4 kare/sn</option>
+            <option value="5">5 kare/sn</option>
+          </select>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="generateBtn" class="primary">QR akışını oluştur</button>
+        <button id="resetBtn" class="secondary" type="button">Temizle</button>
+      </div>
+      <p id="status" role="status">Metni girip QR akışını oluşturun.</p>
+    </section>
+
+    <section id="qrCard" class="card qr-card" aria-labelledby="streamTitle">
+      <div class="qr-top">
+        <div><div class="eyebrow">OPTX1 akışı</div><h2 id="streamTitle" style="font-size:1rem;margin:4px 0 0">QR önizleme</h2></div>
+        <div id="counter" class="counter">0 / 0</div>
+      </div>
+      <div id="qrStage" class="qr-stage">
+        <div id="empty" class="empty">QR akışı oluşturulduğunda ilk kare burada görünecek.</div>
+        <canvas id="qrCanvas" hidden aria-label="Aktarım QR kodu"></canvas>
+      </div>
+      <div class="transport">
+        <button id="prevBtn" disabled aria-label="Önceki kare">← Önceki</button>
+        <button id="playBtn" class="play" disabled>Oynat</button>
+        <button id="nextBtn" disabled aria-label="Sonraki kare">Sonraki →</button>
+      </div>
+      <div class="progress" aria-hidden="true"><span id="progressBar"></span></div>
+      <div class="meta">
+        <div class="stat"><small>Dosya ID</small><strong id="fileId">—</strong></div>
+        <div class="stat"><small>Toplam veri</small><strong id="totalBytes">0 bayt</strong></div>
+        <div class="stat"><small>Parça</small><strong id="totalParts">0</strong></div>
+      </div>
+      <div class="actions" style="justify-content:center">
+        <button id="fullscreenBtn" class="secondary" disabled>Tam ekran QR</button>
+      </div>
+      <details><summary>Geçerli kare verisini göster</summary><div id="raw">—</div></details>
+    </section>
+  </main>
+</div>
+
+<script src="qrcode.min.js"></script>
+<script>
+(() => {
+  const textInput = document.getElementById('textInput');
+  const filenameInput = document.getElementById('filename');
+  const chunkSizeInput = document.getElementById('chunkSize');
+  const fpsInput = document.getElementById('fps');
+  const generateBtn = document.getElementById('generateBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const prevBtn = document.getElementById('prevBtn');
+  const nextBtn = document.getElementById('nextBtn');
+  const playBtn = document.getElementById('playBtn');
+  const fullscreenBtn = document.getElementById('fullscreenBtn');
+  const qrCard = document.getElementById('qrCard');
+  const qrCanvas = document.getElementById('qrCanvas');
+  const emptyEl = document.getElementById('empty');
+  const statusEl = document.getElementById('status');
+  const byteCountEl = document.getElementById('byteCount');
+  const counterEl = document.getElementById('counter');
+  const progressBar = document.getElementById('progressBar');
+  const fileIdEl = document.getElementById('fileId');
+  const totalBytesEl = document.getElementById('totalBytes');
+  const totalPartsEl = document.getElementById('totalParts');
+  const rawEl = document.getElementById('raw');
+
+  let frames = [];
+  let currentIndex = 0;
+  let timer = null;
+
+  function setStatus(message, type = '') {
+    statusEl.textContent = message;
+    statusEl.className = type;
+  }
+
+  function makeFileId() {
+    const random = new Uint32Array(2);
+    crypto.getRandomValues(random);
+    return Date.now().toString(36) + '-' + Array.from(random, n => n.toString(36)).join('');
+  }
+
+  function safeFilename(value) {
+    const cleaned = value.trim().replace(/[|\\/:*?"<>\r\n]/g, '_');
+    return cleaned || 'metin.txt';
+  }
+
+  function bytesToBase64(bytes) {
+    let binary = '';
+    const step = 0x8000;
+    for (let i = 0; i < bytes.length; i += step) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + step));
+    }
+    return btoa(binary);
+  }
+
+  function drawQr(raw) {
+    const qr = qrcode(0, 'L');
+    qr.addData(raw, 'Byte');
+    qr.make();
+
+    const modules = qr.getModuleCount();
+    const quiet = 4;
+    const target = Math.min(820, Math.max(360, window.innerWidth < 500 ? window.innerWidth - 64 : 660));
+    const cell = Math.max(3, Math.floor(target / (modules + quiet * 2)));
+    const size = (modules + quiet * 2) * cell;
+    const ctx = qrCanvas.getContext('2d');
+
+    qrCanvas.width = size;
+    qrCanvas.height = size;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, size, size);
+    ctx.fillStyle = '#000000';
+
+    for (let row = 0; row < modules; row++) {
+      for (let col = 0; col < modules; col++) {
+        if (qr.isDark(row, col)) {
+          ctx.fillRect((col + quiet) * cell, (row + quiet) * cell, cell, cell);
+        }
+      }
+    }
+  }
+
+  function showFrame(index) {
+    if (!frames.length) return;
+    currentIndex = (index + frames.length) % frames.length;
+    const frame = frames[currentIndex];
+
+    try {
+      drawQr(frame.raw);
+    } catch (error) {
+      pause();
+      setStatus('QR üretilemedi. Daha küçük bir parça boyutu seçin.', 'err');
+      return;
+    }
+
+    emptyEl.hidden = true;
+    qrCanvas.hidden = false;
+    counterEl.textContent = `${currentIndex + 1} / ${frames.length}`;
+    progressBar.style.width = `${((currentIndex + 1) / frames.length) * 100}%`;
+    rawEl.textContent = frame.raw;
+  }
+
+  function pause() {
+    if (timer) clearInterval(timer);
+    timer = null;
+    playBtn.textContent = 'Oynat';
+  }
+
+  function play() {
+    if (!frames.length) return;
+    pause();
+    playBtn.textContent = 'Duraklat';
+    timer = setInterval(() => showFrame(currentIndex + 1), 1000 / Number(fpsInput.value));
+  }
+
+  function generate() {
+    pause();
+    const text = textInput.value;
+    const bytes = new TextEncoder().encode(text);
+    if (!bytes.length) {
+      setStatus('Önce gönderilecek metni girin.', 'err');
+      textInput.focus();
+      return;
+    }
+    if (typeof qrcode !== 'function') {
+      setStatus('QR üretim kütüphanesi yüklenemedi.', 'err');
+      return;
+    }
+
+    const chunkSize = Number(chunkSizeInput.value);
+    const total = Math.ceil(bytes.length / chunkSize);
+    const fileId = makeFileId();
+    const filename = safeFilename(filenameInput.value);
+    frames = [];
+
+    for (let index = 0; index < total; index++) {
+      const payload = bytesToBase64(bytes.subarray(index * chunkSize, (index + 1) * chunkSize));
+      frames.push({
+        raw: `OPTX1|${fileId}|${index}|${total}|text/plain;charset=utf-8|${filename}|${payload}`
+      });
+    }
+
+    currentIndex = 0;
+    fileIdEl.textContent = fileId;
+    totalBytesEl.textContent = `${bytes.length.toLocaleString('tr-TR')} bayt`;
+    totalPartsEl.textContent = total.toLocaleString('tr-TR');
+    prevBtn.disabled = nextBtn.disabled = playBtn.disabled = fullscreenBtn.disabled = false;
+    showFrame(0);
+    setStatus(`${total} QR karesi hazır. Alıcı kamerayı ekrana doğrultunca Oynat'a basın.`, 'ok');
+  }
+
+  function reset() {
+    pause();
+    frames = [];
+    currentIndex = 0;
+    textInput.value = '';
+    byteCountEl.textContent = '0';
+    qrCanvas.hidden = true;
+    emptyEl.hidden = false;
+    counterEl.textContent = '0 / 0';
+    progressBar.style.width = '0';
+    fileIdEl.textContent = '—';
+    totalBytesEl.textContent = '0 bayt';
+    totalPartsEl.textContent = '0';
+    rawEl.textContent = '—';
+    prevBtn.disabled = nextBtn.disabled = playBtn.disabled = fullscreenBtn.disabled = true;
+    setStatus('Metni girip QR akışını oluşturun.');
+    textInput.focus();
+  }
+
+  textInput.addEventListener('input', () => {
+    byteCountEl.textContent = new TextEncoder().encode(textInput.value).length.toLocaleString('tr-TR');
+  });
+  generateBtn.addEventListener('click', generate);
+  resetBtn.addEventListener('click', reset);
+  prevBtn.addEventListener('click', () => { pause(); showFrame(currentIndex - 1); });
+  nextBtn.addEventListener('click', () => { pause(); showFrame(currentIndex + 1); });
+  playBtn.addEventListener('click', () => timer ? pause() : play());
+  fpsInput.addEventListener('change', () => { if (timer) play(); });
+  fullscreenBtn.addEventListener('click', async () => {
+    try {
+      if (!document.fullscreenElement) await qrCard.requestFullscreen();
+      else await document.exitFullscreen();
+    } catch (error) {
+      setStatus('Bu tarayıcı tam ekran moduna izin vermedi.', 'err');
+    }
+  });
+  document.addEventListener('fullscreenchange', () => {
+    fullscreenBtn.textContent = document.fullscreenElement ? 'Tam ekrandan çık' : 'Tam ekran QR';
+    if (frames.length) showFrame(currentIndex);
+  });
+  window.addEventListener('resize', () => { if (frames.length) showFrame(currentIndex); });
+
+  const modelContext = document.modelContext;
+  if (modelContext && typeof modelContext.registerTool === 'function') {
+    const lifecycle = new AbortController();
+    window.addEventListener('pagehide', () => lifecycle.abort(), { once:true });
+    try {
+      Promise.resolve(modelContext.registerTool({
+        name:'prepare_optical_qr_stream',
+        title:'Optik QR akışı hazırla',
+        description:'Verilen metni OPTX1 biçimindeki sıralı QR karelerine dönüştürür ve ilk kareyi görünür hale getirir. Oynatmayı başlatmaz.',
+        inputSchema:{
+          type:'object',
+          properties:{
+            text:{ type:'string', minLength:1, description:'QR kareleriyle gönderilecek metin.' },
+            filename:{ type:'string', minLength:1, maxLength:80, default:'metin.txt' },
+            chunkSize:{ type:'integer', enum:[160,240,360,480], default:240 },
+            fps:{ type:'integer', enum:[2,3,4,5], default:4 }
+          },
+          required:['text'],
+          additionalProperties:false
+        },
+        annotations:{ readOnlyHint:false, untrustedContentHint:false },
+        execute(input) {
+          if (!input || typeof input.text !== 'string' || !input.text.length) {
+            throw new Error('text alanı boş olamaz.');
+          }
+          const chunkSize = input.chunkSize === undefined ? 240 : Number(input.chunkSize);
+          const fps = input.fps === undefined ? 4 : Number(input.fps);
+          if (![160,240,360,480].includes(chunkSize)) throw new Error('Geçersiz chunkSize.');
+          if (![2,3,4,5].includes(fps)) throw new Error('Geçersiz fps.');
+          textInput.value = input.text;
+          filenameInput.value = typeof input.filename === 'string' ? input.filename : 'metin.txt';
+          chunkSizeInput.value = String(chunkSize);
+          fpsInput.value = String(fps);
+          byteCountEl.textContent = new TextEncoder().encode(input.text).length.toLocaleString('tr-TR');
+          generate();
+          if (!frames.length) throw new Error(statusEl.textContent);
+          return {
+            fileId:fileIdEl.textContent,
+            totalParts:frames.length,
+            totalBytes:new TextEncoder().encode(input.text).length,
+            status:'ready'
+          };
+        }
+      }, { signal:lifecycle.signal })).catch(error => console.warn('WebMCP aracı kaydedilemedi:', error));
+    } catch (error) {
+      console.warn('WebMCP kullanılamadı:', error);
+    }
+  }
+})();
+</script>
+</body>
+</html>
