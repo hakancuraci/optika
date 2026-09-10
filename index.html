@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Optik Veri Alıcı</title>
+<style>
+  :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color-scheme: dark; }
+  body { margin:0; background:#0b0d10; color:#f5f7fa; }
+  .wrap { max-width:920px; margin:auto; padding:16px; }
+  h1 { font-size:22px; margin:4px 0 14px; }
+  .card { background:#151922; border:1px solid #2a3140; border-radius:16px; padding:14px; margin-bottom:14px; }
+  video { width:100%; max-height:58vh; background:#000; border-radius:12px; object-fit:cover; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  button { appearance:none; border:0; border-radius:12px; padding:11px 14px; font-weight:700; cursor:pointer; }
+  .primary { background:#4f8cff; color:#fff; }
+  .secondary { background:#252c39; color:#fff; }
+  .danger { background:#52242a; color:#fff; }
+  .stat { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:10px; }
+  .box { background:#0f131a; border-radius:10px; padding:10px; }
+  .k { color:#8d98aa; font-size:12px; }
+  .v { font-size:18px; font-weight:800; margin-top:2px; }
+  progress { width:100%; height:14px; }
+  pre { white-space:pre-wrap; word-break:break-all; max-height:200px; overflow:auto; background:#0f131a; padding:10px; border-radius:10px; font-size:12px; }
+  .ok { color:#62d48a; }
+  .warn { color:#ffd166; }
+  .err { color:#ff7b7b; }
+  .hint { color:#aab3c2; font-size:13px; line-height:1.4; }
+  a.download { display:inline-block; margin-top:10px; color:#9fc0ff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Optik Veri Alıcı</h1>
+
+  <div class="card">
+    <video id="video" playsinline muted></video>
+    <div class="row" style="margin-top:12px">
+      <button id="startBtn" class="primary">Kamerayı Aç</button>
+      <button id="stopBtn" class="secondary">Durdur</button>
+      <button id="resetBtn" class="danger">Sıfırla</button>
+    </div>
+    <p id="status" class="hint">Hazır.</p>
+  </div>
+
+  <div class="card">
+    <progress id="progress" value="0" max="100"></progress>
+    <div class="stat">
+      <div class="box"><div class="k">Dosya ID</div><div class="v" id="fileId">-</div></div>
+      <div class="box"><div class="k">Parça</div><div class="v" id="parts">0 / 0</div></div>
+      <div class="box"><div class="k">Son kare</div><div class="v" id="lastIndex">-</div></div>
+      <div class="box"><div class="k">Okuma hızı</div><div class="v" id="rate">0/s</div></div>
+    </div>
+    <div id="downloadArea"></div>
+  </div>
+
+  <div class="card">
+    <div class="k">Son okunan veri</div>
+    <pre id="lastRaw">-</pre>
+    <p class="hint">
+      Beklenen QR içeriği:
+      <code>OPTX1|fileId|index|total|mime|filename|BASE64_PAYLOAD</code>
+    </p>
+  </div>
+</div>
+
+<script src="./jsQR.min.js"></script>
+<script>
+(() => {
+  const video = document.getElementById('video');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const statusEl = document.getElementById('status');
+  const progress = document.getElementById('progress');
+  const fileIdEl = document.getElementById('fileId');
+  const partsEl = document.getElementById('parts');
+  const lastIndexEl = document.getElementById('lastIndex');
+  const rateEl = document.getElementById('rate');
+  const lastRawEl = document.getElementById('lastRaw');
+  const downloadArea = document.getElementById('downloadArea');
+
+  let stream = null;
+  let detector = null;
+  let running = false;
+  let chunks = new Map();
+  let meta = null;
+  let seenCount = 0;
+  let lastRateTs = performance.now();
+  let rateCounter = 0;
+  let useNativeDetector = false;
+  let lastFallbackScan = 0;
+
+  const scanCanvas = document.createElement('canvas');
+  const scanContext = scanCanvas.getContext('2d', {
+    willReadFrequently: true
+  });
+
+  function setStatus(msg, cls='hint') {
+    statusEl.className = cls;
+    statusEl.textContent = msg;
+  }
+
+  function resetState() {
+    chunks.clear();
+    meta = null;
+    seenCount = 0;
+    rateCounter = 0;
+    progress.value = 0;
+    fileIdEl.textContent = '-';
+    partsEl.textContent = '0 / 0';
+    lastIndexEl.textContent = '-';
+    rateEl.textContent = '0/s';
+    lastRawEl.textContent = '-';
+    downloadArea.innerHTML = '';
+    setStatus('Hazır.');
+  }
+
+  async function startCamera() {
+    try {
+      useNativeDetector = false;
+      detector = null;
+
+      if ('BarcodeDetector' in window) {
+        try {
+          const supported = await BarcodeDetector.getSupportedFormats();
+          if (supported.includes('qr_code')) {
+            detector = new BarcodeDetector({ formats:['qr_code'] });
+            useNativeDetector = true;
+          }
+        } catch (error) {
+          console.warn('BarcodeDetector kullanılamadı, jsQR deneniyor:', error);
+        }
+      }
+
+      if (!useNativeDetector && typeof jsQR !== 'function') {
+        throw new Error('jsQR yüklenemedi. İnternet bağlantısını kontrol edip sayfayı yenileyin.');
+      }
+
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal:'environment' },
+          width: { ideal:1920 },
+          height: { ideal:1080 },
+          frameRate: { ideal:30, max:60 }
+        },
+        audio:false
+      });
+
+      video.srcObject = stream;
+      await video.play();
+      running = true;
+      setStatus(
+        useNativeDetector
+          ? 'Kamera açık. Yerleşik QR algılayıcı kullanılıyor.'
+          : 'Kamera açık. jsQR uyumluluk modu kullanılıyor.',
+        'ok'
+      );
+      scanLoop();
+    } catch (err) {
+      setStatus('Kamera açılamadı: ' + err.message, 'err');
+    }
+  }
+
+  function stopCamera() {
+    running = false;
+    if (stream) {
+      for (const track of stream.getTracks()) track.stop();
+      stream = null;
+    }
+    video.srcObject = null;
+    setStatus('Kamera durduruldu.');
+  }
+
+  function b64ToBytes(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function parseFrame(raw) {
+    // OPTX1|fileId|index|total|mime|filename|payload
+    const p = raw.split('|');
+    if (p.length < 7 || p[0] !== 'OPTX1') return null;
+
+    const fileId = p[1];
+    const index = Number(p[2]);
+    const total = Number(p[3]);
+    const mime = p[4] || 'application/octet-stream';
+    const filename = p[5] || 'received.bin';
+    const payload = p.slice(6).join('|');
+
+    if (!Number.isInteger(index) || !Number.isInteger(total)) return null;
+    if (index < 0 || total <= 0 || index >= total) return null;
+
+    return { fileId, index, total, mime, filename, payload };
+  }
+
+  function updateUI(frame) {
+    fileIdEl.textContent = frame.fileId;
+    partsEl.textContent = `${chunks.size} / ${frame.total}`;
+    lastIndexEl.textContent = frame.index;
+    progress.value = (chunks.size / frame.total) * 100;
+
+    rateCounter++;
+    const now = performance.now();
+    if (now - lastRateTs >= 1000) {
+      rateEl.textContent = `${rateCounter}/s`;
+      rateCounter = 0;
+      lastRateTs = now;
+    }
+  }
+
+  function assembleIfComplete() {
+    if (!meta || chunks.size !== meta.total) return;
+
+    try {
+      const byteChunks = [];
+      let totalBytes = 0;
+
+      for (let i=0; i<meta.total; i++) {
+        const part = chunks.get(i);
+        if (!part) return;
+        const bytes = b64ToBytes(part);
+        byteChunks.push(bytes);
+        totalBytes += bytes.length;
+      }
+
+      const merged = new Uint8Array(totalBytes);
+      let off = 0;
+      for (const arr of byteChunks) {
+        merged.set(arr, off);
+        off += arr.length;
+      }
+
+      const blob = new Blob([merged], { type:meta.mime });
+      const url = URL.createObjectURL(blob);
+
+      downloadArea.innerHTML = '';
+      const a = document.createElement('a');
+      a.className = 'download';
+      a.href = url;
+      a.download = meta.filename;
+      a.textContent = `Dosyayı indir: ${meta.filename} (${totalBytes.toLocaleString()} byte)`;
+      downloadArea.appendChild(a);
+
+      setStatus('Tüm parçalar alındı. Dosya hazır.', 'ok');
+    } catch (err) {
+      setStatus('Birleştirme hatası: ' + err.message, 'err');
+    }
+  }
+
+  function acceptRaw(raw) {
+    lastRawEl.textContent = raw;
+    const f = parseFrame(raw);
+    if (!f) return;
+
+    if (!meta) {
+      meta = {
+        fileId:f.fileId,
+        total:f.total,
+        mime:f.mime,
+        filename:f.filename
+      };
+    }
+
+    if (f.fileId !== meta.fileId) return;
+    if (f.total !== meta.total) return;
+
+    if (!chunks.has(f.index)) {
+      chunks.set(f.index, f.payload);
+      seenCount++;
+      updateUI(f);
+      assembleIfComplete();
+    }
+  }
+
+  async function scanLoop(timestamp = 0) {
+    if (!running) return;
+
+    try {
+      if (video.readyState >= 2) {
+        if (useNativeDetector) {
+          const codes = await detector.detect(video);
+          for (const code of codes) {
+            if (code.rawValue) acceptRaw(code.rawValue);
+          }
+        } else if (timestamp - lastFallbackScan >= 100) {
+          lastFallbackScan = timestamp;
+
+          const sourceWidth = video.videoWidth;
+          const sourceHeight = video.videoHeight;
+          const maxWidth = 1280;
+          const scale = Math.min(1, maxWidth / sourceWidth);
+
+          scanCanvas.width = Math.round(sourceWidth * scale);
+          scanCanvas.height = Math.round(sourceHeight * scale);
+          scanContext.drawImage(
+            video,
+            0,
+            0,
+            scanCanvas.width,
+            scanCanvas.height
+          );
+
+          const imageData = scanContext.getImageData(
+            0,
+            0,
+            scanCanvas.width,
+            scanCanvas.height
+          );
+          const code = jsQR(
+            imageData.data,
+            imageData.width,
+            imageData.height,
+            { inversionAttempts:'dontInvert' }
+          );
+
+          if (code && code.data) acceptRaw(code.data);
+        }
+      }
+    } catch (e) {
+      // Geçici decode hataları normaldir.
+    }
+
+    requestAnimationFrame(scanLoop);
+  }
+
+  startBtn.addEventListener('click', startCamera);
+  stopBtn.addEventListener('click', stopCamera);
+  resetBtn.addEventListener('click', resetState);
+
+  resetState();
+})();
+</script>
+</body>
+</html>
