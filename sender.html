@@ -42,8 +42,9 @@
   .qr-top { display:flex; align-items:center; justify-content:space-between; gap:12px; text-align:left; margin-bottom:12px; }
   .eyebrow { color:var(--cyan); text-transform:uppercase; letter-spacing:.12em; font-size:.75rem; font-weight:900; }
   .counter { font-variant-numeric:tabular-nums; font-weight:900; font-size:1.1rem; }
-  .qr-stage { min-height:420px; display:grid; place-items:center; padding:18px; background:#fff; border-radius:14px; }
-  canvas { display:block; width:min(100%,620px); height:auto; image-rendering:pixelated; }
+  .qr-stage { min-height:420px; display:grid; place-items:center; padding:12px; background:#fff; border-radius:14px; }
+  .qr-grid { width:100%; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; align-items:center; }
+  canvas { display:block; width:auto; max-width:100%; height:auto; justify-self:center; image-rendering:pixelated; }
   .empty { color:#596579; max-width:300px; line-height:1.5; }
   .transport { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:9px; margin-top:12px; }
   .transport button:first-child { justify-self:end; }
@@ -59,9 +60,37 @@
   #status.ok { color:var(--ok); } #status.err { color:var(--danger); }
   details { margin-top:12px; text-align:left; }
   summary { cursor:pointer; color:#aebbd0; font-size:.85rem; }
-  #raw { margin-top:8px; max-height:110px; overflow:auto; padding:9px; background:#080c12; border-radius:8px; color:#8897ad; font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; word-break:break-all; }
-  :fullscreen.qr-card { display:grid; align-content:center; background:#080b10; padding:3vh; }
-  :fullscreen .qr-stage { min-height:70vh; }
+  #raw { margin-top:8px; max-height:110px; overflow:auto; padding:9px; background:#080c12; border-radius:8px; color:#8897ad; font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; word-break:break-all; }
+  :fullscreen.qr-card {
+    width:100vw;
+    height:100vh;
+    max-width:none;
+    margin:0;
+    padding:0;
+    border:0;
+    border-radius:0;
+    display:grid;
+    place-items:center;
+    overflow:hidden;
+    background:#fff;
+  }
+  :fullscreen.qr-card::backdrop { background:#fff; }
+  :fullscreen.qr-card > :not(.qr-stage) { display:none !important; }
+  :fullscreen.qr-card > .qr-stage {
+    width:100vw;
+    height:100vh;
+    min-height:100vh;
+    padding:1vh;
+    border-radius:0;
+    display:grid;
+    place-items:center;
+    background:#fff;
+  }
+  :fullscreen.qr-card .qr-grid {
+    width:min(98vw,98vh);
+    margin:0;
+    gap:1vh;
+  }
   @media (max-width:820px) {
     main { grid-template-columns:1fr; }
     .qr-card { position:static; }
@@ -109,8 +138,8 @@
           <label class="label" for="chunkSize">Parça boyutu</label>
           <select id="chunkSize">
             <option value="240">240 bayt · güçlü okuma</option>
-            <option value="480">480 bayt · uyumlu</option>
-            <option value="720" selected>720 bayt · dengeli</option>
+            <option value="480" selected>480 bayt · 4 QR dengeli</option>
+            <option value="720">720 bayt · yoğun</option>
             <option value="960">960 bayt · hızlı</option>
           </select>
         </div>
@@ -133,12 +162,17 @@
 
     <section id="qrCard" class="card qr-card" aria-labelledby="streamTitle">
       <div class="qr-top">
-        <div><div class="eyebrow">OPTX2 akışı</div><h2 id="streamTitle" style="font-size:1rem;margin:4px 0 0">QR önizleme</h2></div>
+        <div><div class="eyebrow">OPTX2 · 4 paralel kanal</div><h2 id="streamTitle" style="font-size:1rem;margin:4px 0 0">2×2 QR önizleme</h2></div>
         <div id="counter" class="counter">0 / 0</div>
       </div>
       <div id="qrStage" class="qr-stage">
         <div id="empty" class="empty">QR akışı oluşturulduğunda ilk kare burada görünecek.</div>
-        <canvas id="qrCanvas" hidden aria-label="Aktarım QR kodu"></canvas>
+        <div id="qrGrid" class="qr-grid" hidden>
+          <canvas id="qrCanvas0" aria-label="Aktarım QR kodu 1"></canvas>
+          <canvas id="qrCanvas1" aria-label="Aktarım QR kodu 2"></canvas>
+          <canvas id="qrCanvas2" aria-label="Aktarım QR kodu 3"></canvas>
+          <canvas id="qrCanvas3" aria-label="Aktarım QR kodu 4"></canvas>
+        </div>
       </div>
       <div class="transport">
         <button id="prevBtn" disabled aria-label="Önceki kare">← Önceki</button>
@@ -175,7 +209,8 @@
   const playBtn = document.getElementById('playBtn');
   const fullscreenBtn = document.getElementById('fullscreenBtn');
   const qrCard = document.getElementById('qrCard');
-  const qrCanvas = document.getElementById('qrCanvas');
+  const qrGrid = document.getElementById('qrGrid');
+  const qrCanvases = Array.from({ length:4 }, (_, index) => document.getElementById(`qrCanvas${index}`));
   const emptyEl = document.getElementById('empty');
   const statusEl = document.getElementById('status');
   const byteCountEl = document.getElementById('byteCount');
@@ -207,9 +242,9 @@
     return cleaned || 'metin.txt';
   }
 
-  function getCodingProfile(fileSize, requestedChunkSize = 720) {
+  function getCodingProfile(fileSize, requestedChunkSize = 480) {
     const allowedSizes = [240, 480, 720, 960];
-    const chunkSize = allowedSizes.includes(Number(requestedChunkSize)) ? Number(requestedChunkSize) : 720;
+    const chunkSize = allowedSizes.includes(Number(requestedChunkSize)) ? Number(requestedChunkSize) : 480;
     const groupSize = 64;
     const parityRate = 0.16;
     const dataBlocks = Math.ceil(fileSize / chunkSize);
@@ -261,20 +296,19 @@
     return { bytes, compressed: false, originalLength: bytes.length };
   }
 
-  function drawQr(raw) {
+  function drawQr(raw, canvas, target) {
     const qr = qrcode(0, 'M');
     qr.addData(raw, raw.startsWith('O2') ? 'Alphanumeric' : 'Byte');
     qr.make();
 
     const modules = qr.getModuleCount();
     const quiet = 4;
-    const target = Math.min(820, Math.max(360, window.innerWidth < 500 ? window.innerWidth - 64 : 660));
-    const cell = Math.max(2, Math.floor(target / (modules + quiet * 2)));
+    const cell = Math.max(1, Math.floor(target / (modules + quiet * 2)));
     const size = (modules + quiet * 2) * cell;
-    const ctx = qrCanvas.getContext('2d');
+    const ctx = canvas.getContext('2d');
 
-    qrCanvas.width = size;
-    qrCanvas.height = size;
+    canvas.width = size;
+    canvas.height = size;
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, size, size);
     ctx.fillStyle = '#000000';
@@ -290,22 +324,33 @@
 
   function showFrame(index) {
     if (!frames.length) return;
-    currentIndex = (index + frames.length) % frames.length;
-    const frame = frames[currentIndex];
+    const batchCount = Math.ceil(frames.length / qrCanvases.length);
+    currentIndex = (index + batchCount) % batchCount;
+    const firstFrame = currentIndex * qrCanvases.length;
+    emptyEl.hidden = true;
+    qrGrid.hidden = false;
+    const slotWidth = Math.max(150, Math.floor((qrGrid.clientWidth - 10) / 2));
+    const visibleRaw = [];
 
     try {
-      drawQr(frame.raw);
+      for (let slot = 0; slot < qrCanvases.length; slot++) {
+        const frame = frames[firstFrame + slot];
+        const canvas = qrCanvases[slot];
+        canvas.hidden = !frame;
+        if (!frame) continue;
+        drawQr(frame.raw, canvas, slotWidth);
+        visibleRaw.push(`[${firstFrame + slot + 1}] ${frame.raw}`);
+      }
     } catch (error) {
       pause();
       setStatus('QR üretilemedi. Daha küçük bir parça boyutu seçin.', 'err');
       return;
     }
 
-    emptyEl.hidden = true;
-    qrCanvas.hidden = false;
-    counterEl.textContent = `${currentIndex + 1} / ${frames.length}`;
-    progressBar.style.width = `${((currentIndex + 1) / frames.length) * 100}%`;
-    rawEl.textContent = frame.raw;
+    const lastFrame = Math.min(firstFrame + qrCanvases.length, frames.length);
+    counterEl.textContent = `${firstFrame + 1}–${lastFrame} / ${frames.length}`;
+    progressBar.style.width = `${(lastFrame / frames.length) * 100}%`;
+    rawEl.textContent = visibleRaw.join('\n\n');
   }
 
   function pause() {
@@ -416,10 +461,10 @@
       totalPartsEl.textContent = `${profile.totalBlocks.toLocaleString('tr-TR')} + üstveri`;
       prevBtn.disabled = nextBtn.disabled = playBtn.disabled = fullscreenBtn.disabled = false;
       showFrame(0);
-      setStatus(`${profile.groupCount} bağımsız grupta ${profile.totalBlocks} veri/kurtarma karesi hazır. Her grup yaklaşık %16 kare kaybını tolere eder.`, 'ok');
+      setStatus(`${profile.groupCount} bağımsız grupta ${profile.totalBlocks} veri/kurtarma karesi hazır. Her adımda 4 QR gösterilir; gruplar yaklaşık %16 kare kaybını tolere eder.`, 'ok');
     } catch (error) {
       frames = [];
-      qrCanvas.hidden = true;
+      qrGrid.hidden = true;
       emptyEl.hidden = false;
       prevBtn.disabled = nextBtn.disabled = playBtn.disabled = fullscreenBtn.disabled = true;
       setStatus('Akış oluşturulamadı: ' + error.message, 'err');
@@ -436,7 +481,7 @@
     textInput.value = '';
     fileInput.value = '';
     byteCountEl.textContent = '0';
-    qrCanvas.hidden = true;
+    qrGrid.hidden = true;
     emptyEl.hidden = false;
     counterEl.textContent = '0 / 0';
     progressBar.style.width = '0';
@@ -502,7 +547,7 @@
           properties:{
             text:{ type:'string', minLength:1, description:'QR kareleriyle gönderilecek metin. Dosya gönderimi için kullanılmaz.' },
             filename:{ type:'string', minLength:1, maxLength:80, default:'gonderilen_dosya.bin' },
-            chunkSize:{ type:'integer', enum:[240,480,720,960], default:720 },
+            chunkSize:{ type:'integer', enum:[240,480,720,960], default:480 },
             fps:{ type:'integer', enum:[4,6,8,10], default:6 }
           },
           required:[],
@@ -513,7 +558,7 @@
           if (!input || typeof input.text !== 'string' || !input.text.length) {
             throw new Error('text alanı boş olamaz.');
           }
-          const chunkSize = input.chunkSize === undefined ? 720 : Number(input.chunkSize);
+          const chunkSize = input.chunkSize === undefined ? 480 : Number(input.chunkSize);
           const fps = input.fps === undefined ? 6 : Number(input.fps);
           if (![240,480,720,960].includes(chunkSize)) throw new Error('Geçersiz chunkSize.');
           if (![4,6,8,10].includes(fps)) throw new Error('Geçersiz fps.');

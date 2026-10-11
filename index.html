@@ -91,6 +91,7 @@
   let rateCounter = 0;
   let useNativeDetector = false;
   let lastFallbackScan = 0;
+  let lastFullFallbackScan = 0;
   let transferMode = null;
   let v2Meta = null;
   let v2FileId = null;
@@ -176,8 +177,8 @@
       running = true;
       setStatus(
         useNativeDetector
-          ? 'Kamera açık. Yerleşik QR algılayıcı kullanılıyor.'
-          : 'Kamera açık. jsQR uyumluluk modu kullanılıyor.',
+          ? 'Kamera açık. Aynı karede dört QR aranıyor.'
+          : 'Kamera açık. Görüntü dört bölgede paralel taranıyor.',
         'ok'
       );
       scanLoop();
@@ -663,6 +664,58 @@
     }
   }
 
+  function decodeJsQrRegion(sourceX, sourceY, sourceWidth, sourceHeight, maxWidth = 620) {
+    if (sourceWidth <= 0 || sourceHeight <= 0) return null;
+    const scale = Math.min(1, maxWidth / sourceWidth);
+    scanCanvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    scanCanvas.height = Math.max(1, Math.round(sourceHeight * scale));
+    scanContext.drawImage(
+      video,
+      sourceX,
+      sourceY,
+      sourceWidth,
+      sourceHeight,
+      0,
+      0,
+      scanCanvas.width,
+      scanCanvas.height
+    );
+    const imageData = scanContext.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+    return jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts:'dontInvert' });
+  }
+
+  function scanFourRegions(timestamp) {
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    if (!width || !height) return;
+    const halfWidth = width / 2;
+    const halfHeight = height / 2;
+    const overlapX = width * 0.06;
+    const overlapY = height * 0.06;
+    const found = new Set();
+
+    for (let row = 0; row < 2; row++) {
+      for (let column = 0; column < 2; column++) {
+        const left = Math.max(0, column * halfWidth - (column ? overlapX : 0));
+        const top = Math.max(0, row * halfHeight - (row ? overlapY : 0));
+        const right = Math.min(width, (column + 1) * halfWidth + (column ? 0 : overlapX));
+        const bottom = Math.min(height, (row + 1) * halfHeight + (row ? 0 : overlapY));
+        const code = decodeJsQrRegion(left, top, right - left, bottom - top);
+        if (code && code.data && !found.has(code.data)) {
+          found.add(code.data);
+          acceptRaw(code.data);
+        }
+      }
+    }
+
+    // Eski tek-QR akışları ve kadraja tam oturmayan ekranlar için seyrek tam-kare taraması.
+    if (timestamp - lastFullFallbackScan >= 500) {
+      lastFullFallbackScan = timestamp;
+      const code = decodeJsQrRegion(0, 0, width, height, 960);
+      if (code && code.data && !found.has(code.data)) acceptRaw(code.data);
+    }
+  }
+
   async function scanLoop(timestamp = 0) {
     if (!running) return;
 
@@ -675,36 +728,7 @@
           }
         } else if (timestamp - lastFallbackScan >= 66) {
           lastFallbackScan = timestamp;
-
-          const sourceWidth = video.videoWidth;
-          const sourceHeight = video.videoHeight;
-          const maxWidth = 960;
-          const scale = Math.min(1, maxWidth / sourceWidth);
-
-          scanCanvas.width = Math.round(sourceWidth * scale);
-          scanCanvas.height = Math.round(sourceHeight * scale);
-          scanContext.drawImage(
-            video,
-            0,
-            0,
-            scanCanvas.width,
-            scanCanvas.height
-          );
-
-          const imageData = scanContext.getImageData(
-            0,
-            0,
-            scanCanvas.width,
-            scanCanvas.height
-          );
-          const code = jsQR(
-            imageData.data,
-            imageData.width,
-            imageData.height,
-            { inversionAttempts:'dontInvert' }
-          );
-
-          if (code && code.data) acceptRaw(code.data);
+          scanFourRegions(timestamp);
         }
       }
     } catch (e) {
