@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<meta name="description" content="Metni OPTX1 biçiminde QR karelerine dönüştürür." />
+<meta name="description" content="Dosyaları ve metni OPTX1 biçiminde QR karelerine dönüştürür." />
 <title>Optik Veri Gönderici</title>
 <style>
   :root {
@@ -82,7 +82,7 @@
   <header>
     <div class="brand">
       <div class="mark">TX</div>
-      <div><h1>Optik Veri Gönderici</h1><div class="sub">Metni sıralı QR karelerine dönüştürür</div></div>
+      <div><h1>Optik Veri Gönderici</h1><div class="sub">Dosyaları ve metni sıralı QR karelerine dönüştürür</div></div>
     </div>
     <a class="back" href="index.html">Alıcıya geç</a>
   </header>
@@ -91,14 +91,19 @@
     <section class="card" aria-labelledby="inputTitle">
       <h2 id="inputTitle" style="font-size:1rem;margin:0 0 14px">Gönderilecek içerik</h2>
       <div class="field">
-        <label class="label" for="textInput">Metin</label>
-        <textarea id="textInput" placeholder="Göndermek istediğiniz metni buraya yazın…" spellcheck="true"></textarea>
+        <label class="label" for="fileInput">Dosya</label>
+        <input id="fileInput" type="file" />
+        <p class="hint">Bir dosya seçilirse metin alanı dikkate alınmaz. Dosya aktarımı için kullanılabilir.</p>
+      </div>
+      <div class="field">
+        <label class="label" for="textInput">Metin (isteğe bağlı)</label>
+        <textarea id="textInput" placeholder="Metin olarak göndermek isterseniz buraya yazın…" spellcheck="true"></textarea>
         <p class="hint"><span id="byteCount">0</span> bayt · Türkçe karakterler UTF-8 olarak korunur.</p>
       </div>
       <div class="grid">
         <div class="field">
-          <label class="label" for="filename">Dosya adı</label>
-          <input id="filename" value="metin.txt" maxlength="80" />
+          <label class="label" for="filename">İsim / Dosya adı</label>
+          <input id="filename" value="gonderilen_dosya.bin" maxlength="80" />
         </div>
         <div class="field">
           <label class="label" for="chunkSize">Parça boyutu</label>
@@ -158,6 +163,7 @@
 <script>
 (() => {
   const textInput = document.getElementById('textInput');
+  const fileInput = document.getElementById('fileInput');
   const filenameInput = document.getElementById('filename');
   const chunkSizeInput = document.getElementById('chunkSize');
   const fpsInput = document.getElementById('fps');
@@ -268,13 +274,30 @@
     timer = setInterval(() => showFrame(currentIndex + 1), 1000 / Number(fpsInput.value));
   }
 
-  function generate() {
+  async function generate() {
     pause();
+
+    const selectedFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
     const text = textInput.value;
-    const bytes = new TextEncoder().encode(text);
+    let bytes;
+    let mimeType = 'text/plain;charset=utf-8';
+    let filename = safeFilename(filenameInput.value);
+
+    if (selectedFile) {
+      const fileBytes = new Uint8Array(await selectedFile.arrayBuffer());
+      bytes = fileBytes;
+      mimeType = selectedFile.type || 'application/octet-stream';
+      filename = safeFilename(selectedFile.name || filenameInput.value || 'gonderilen_dosya.bin');
+      filenameInput.value = filename;
+    } else {
+      bytes = new TextEncoder().encode(text);
+      filename = safeFilename(filenameInput.value || 'metin.txt');
+      filenameInput.value = filename;
+    }
+
     if (!bytes.length) {
-      setStatus('Önce gönderilecek metni girin.', 'err');
-      textInput.focus();
+      setStatus(selectedFile ? 'Seçilen dosya boş. Lütfen başka bir dosya seçin.' : 'Önce gönderilecek metni girin.', 'err');
+      if (!selectedFile) textInput.focus();
       return;
     }
     if (typeof qrcode !== 'function') {
@@ -285,13 +308,12 @@
     const chunkSize = Number(chunkSizeInput.value);
     const total = Math.ceil(bytes.length / chunkSize);
     const fileId = makeFileId();
-    const filename = safeFilename(filenameInput.value);
     frames = [];
 
     for (let index = 0; index < total; index++) {
       const payload = bytesToBase64(bytes.subarray(index * chunkSize, (index + 1) * chunkSize));
       frames.push({
-        raw: `OPTX1|${fileId}|${index}|${total}|text/plain;charset=utf-8|${filename}|${payload}`
+        raw: `OPTX1|${fileId}|${index}|${total}|${mimeType}|${filename}|${payload}`
       });
     }
 
@@ -309,6 +331,7 @@
     frames = [];
     currentIndex = 0;
     textInput.value = '';
+    fileInput.value = '';
     byteCountEl.textContent = '0';
     qrCanvas.hidden = true;
     emptyEl.hidden = false;
@@ -319,12 +342,27 @@
     totalPartsEl.textContent = '0';
     rawEl.textContent = '—';
     prevBtn.disabled = nextBtn.disabled = playBtn.disabled = fullscreenBtn.disabled = true;
-    setStatus('Metni girip QR akışını oluşturun.');
+    setStatus('Dosya seçin veya metni girip QR akışını oluşturun.');
     textInput.focus();
   }
 
-  textInput.addEventListener('input', () => {
-    byteCountEl.textContent = new TextEncoder().encode(textInput.value).length.toLocaleString('tr-TR');
+  function syncByteCount() {
+    const selectedFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+    const size = selectedFile ? selectedFile.size : new TextEncoder().encode(textInput.value).length;
+    byteCountEl.textContent = size.toLocaleString('tr-TR');
+  }
+
+  textInput.addEventListener('input', syncByteCount);
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (file) {
+      filenameInput.value = safeFilename(file.name || 'gonderilen_dosya.bin');
+      textInput.value = '';
+      setStatus(`${file.name} seçildi. QR akışını oluşturabilirsiniz.`, 'ok');
+    } else {
+      setStatus('Dosya seçimi kaldırıldı. Metin veya dosya kullanabilirsiniz.', '');
+    }
+    syncByteCount();
   });
   generateBtn.addEventListener('click', generate);
   resetBtn.addEventListener('click', reset);
@@ -354,16 +392,16 @@
       Promise.resolve(modelContext.registerTool({
         name:'prepare_optical_qr_stream',
         title:'Optik QR akışı hazırla',
-        description:'Verilen metni OPTX1 biçimindeki sıralı QR karelerine dönüştürür ve ilk kareyi görünür hale getirir. Oynatmayı başlatmaz.',
+        description:'Verilen dosyayı veya metni OPTX1 biçimindeki sıralı QR karelerine dönüştürür ve ilk kareyi görünür hale getirir. Oynatmayı başlatmaz.',
         inputSchema:{
           type:'object',
           properties:{
-            text:{ type:'string', minLength:1, description:'QR kareleriyle gönderilecek metin.' },
-            filename:{ type:'string', minLength:1, maxLength:80, default:'metin.txt' },
+            text:{ type:'string', minLength:1, description:'QR kareleriyle gönderilecek metin. Dosya gönderimi için kullanılmaz.' },
+            filename:{ type:'string', minLength:1, maxLength:80, default:'gonderilen_dosya.bin' },
             chunkSize:{ type:'integer', enum:[160,240,360,480], default:240 },
             fps:{ type:'integer', enum:[2,3,4,5], default:4 }
           },
-          required:['text'],
+          required:[],
           additionalProperties:false
         },
         annotations:{ readOnlyHint:false, untrustedContentHint:false },
