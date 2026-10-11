@@ -58,13 +58,14 @@
     <div class="k">Son okunan veri</div>
     <pre id="lastRaw">-</pre>
     <p class="hint">
-      Beklenen QR içeriği:
-      <code>OPTX1|fileId|index|total|mime|filename|BASE64_PAYLOAD</code>
+      OPTX2 akışları kare CRC’si, gruplu hata düzeltme ve dosya SHA-256 doğrulamasıyla alınır.
+      Eski OPTX1 akışları da desteklenir.
     </p>
   </div>
 </div>
 
 <script src="./jsQR.min.js"></script>
+<script src="./optx.js"></script>
 <script>
 (() => {
   const video = document.getElementById('video');
@@ -90,6 +91,16 @@
   let rateCounter = 0;
   let useNativeDetector = false;
   let lastFallbackScan = 0;
+  let transferMode = null;
+  let v2Meta = null;
+  let v2FileId = null;
+  let v2Groups = new Map();
+  let v2Recovered = new Map();
+  let v2Pending = [];
+  let v2Received = 0;
+  let v2Recovering = new Set();
+  let completed = false;
+  let downloadUrl = null;
 
   const scanCanvas = document.createElement('canvas');
   const scanContext = scanCanvas.getContext('2d', {
@@ -102,10 +113,22 @@
   }
 
   function resetState() {
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+    downloadUrl = null;
     chunks.clear();
     meta = null;
     seenCount = 0;
     rateCounter = 0;
+    lastRateTs = performance.now();
+    transferMode = null;
+    v2Meta = null;
+    v2FileId = null;
+    v2Groups = new Map();
+    v2Recovered = new Map();
+    v2Pending = [];
+    v2Received = 0;
+    v2Recovering = new Set();
+    completed = false;
     progress.value = 0;
     fileIdEl.textContent = '-';
     partsEl.textContent = '0 / 0';
@@ -117,6 +140,7 @@
   }
 
   async function startCamera() {
+    if (running) return;
     try {
       useNativeDetector = false;
       detector = null;
@@ -179,8 +203,141 @@
     return out;
   }
 
+  const GF256 = (() => {
+    const exp = new Uint8Array(512);
+    const log = new Uint8Array(256);
+    let x = 1;
+
+    for (let i = 0; i < 255; i++) {
+      exp[i] = x;
+      log[x] = i;
+      x <<= 1;
+      if (x & 0x100) x ^= 0x11d;
+    }
+
+    for (let i = 255; i < 512; i++) {
+      exp[i] = exp[i - 255];
+    }
+
+    return { exp, log };
+  })();
+
+  function gfPow(base, expValue) {
+    if (base === 0) return 0;
+    if (expValue === 0) return 1;
+    return GF256.exp[(GF256.log[base] * expValue) % 255];
+  }
+
+  function gfMul(a, b) {
+    if (a === 0 || b === 0) return 0;
+    return GF256.exp[(GF256.log[a] + GF256.log[b]) % 255];
+  }
+
+  function gfInv(value) {
+    if (value === 0) return 0;
+    return GF256.exp[(255 - GF256.log[value]) % 255];
+  }
+
+  function buildGeneratorMatrix(dataBlocks, parityBlocks) {
+    const total = dataBlocks + parityBlocks;
+    const matrix = [];
+    for (let blockIndex = 0; blockIndex < total; blockIndex++) {
+      const row = new Array(dataBlocks).fill(0);
+      if (blockIndex < dataBlocks) {
+        row[blockIndex] = 1;
+      } else {
+        const base = blockIndex - dataBlocks + 1;
+        for (let col = 0; col < dataBlocks; col++) {
+          row[col] = gfPow(base, col);
+        }
+      }
+      matrix.push(row);
+    }
+    return matrix;
+  }
+
+  function solveLinearSystem(matrix, rhs) {
+    if (!matrix.length || !matrix[0].length) return null;
+    const n = matrix[0].length;
+    const augmented = matrix.map((row, index) => [...row, rhs[index]]);
+
+    for (let col = 0; col < n; col++) {
+      let pivot = -1;
+      for (let row = col; row < augmented.length; row++) {
+        if (augmented[row][col] !== 0) {
+          pivot = row;
+          break;
+        }
+      }
+      if (pivot === -1) return null;
+      if (pivot !== col) {
+        [augmented[col], augmented[pivot]] = [augmented[pivot], augmented[col]];
+      }
+
+      const inv = gfInv(augmented[col][col]);
+      for (let j = col; j <= n; j++) {
+        augmented[col][j] = gfMul(augmented[col][j], inv);
+      }
+
+      for (let row = 0; row < augmented.length; row++) {
+        if (row === col) continue;
+        const factor = augmented[row][col];
+        if (factor === 0) continue;
+        for (let j = col; j <= n; j++) {
+          augmented[row][j] ^= gfMul(factor, augmented[col][j]);
+        }
+      }
+    }
+
+    return augmented.map(row => row[n]);
+  }
+
+  function reconstructDataBlocks(blockMap, total, dataBlocks, parityBlocks) {
+    if (!blockMap || blockMap.size < dataBlocks) return null;
+
+    const matrix = buildGeneratorMatrix(dataBlocks, parityBlocks);
+    const selected = Array.from(blockMap.entries())
+      .filter(([idx]) => Number.isInteger(idx) && idx >= 0 && idx < total)
+      .sort((a, b) => a[0] - b[0]);
+
+    if (selected.length < dataBlocks) return null;
+
+    const chosen = selected.slice(0, dataBlocks).map(([idx, payload]) => ({
+      idx,
+      bytes: b64ToBytes(payload)
+    }));
+
+    const blockSize = Math.max(...chosen.map(item => item.bytes.length), 1);
+    const recovered = Array.from({ length: dataBlocks }, () => new Uint8Array(blockSize));
+
+    for (let byteIndex = 0; byteIndex < blockSize; byteIndex++) {
+      const rows = [];
+      const rhs = [];
+      for (let i = 0; i < dataBlocks; i++) {
+        const row = matrix[chosen[i].idx];
+        rows.push(row);
+        rhs.push(chosen[i].bytes[byteIndex] ?? 0);
+      }
+
+      const solution = solveLinearSystem(rows, rhs);
+      if (!solution) return null;
+
+      for (let i = 0; i < dataBlocks; i++) {
+        recovered[i][byteIndex] = solution[i];
+      }
+    }
+
+    const merged = new Uint8Array(dataBlocks * blockSize);
+    let offset = 0;
+    for (let i = 0; i < dataBlocks; i++) {
+      merged.set(recovered[i], offset);
+      offset += recovered[i].length;
+    }
+
+    return merged;
+  }
+
   function parseFrame(raw) {
-    // OPTX1|fileId|index|total|mime|filename|payload
     const p = raw.split('|');
     if (p.length < 7 || p[0] !== 'OPTX1') return null;
 
@@ -189,12 +346,36 @@
     const total = Number(p[3]);
     const mime = p[4] || 'application/octet-stream';
     const filename = p[5] || 'received.bin';
-    const payload = p.slice(6).join('|');
+    let payload = p.slice(6).join('|');
+    let dataBlocks = null;
+    let parityBlocks = null;
+    let requiredBlocks = null;
+    let compressed = false;
+    let originalSize = 0;
+
+    const hasExtendedHeader = p.length >= 12 && Number.isInteger(Number(p[6])) && Number.isInteger(Number(p[7])) && Number.isInteger(Number(p[8]));
+    if (hasExtendedHeader) {
+      dataBlocks = Number(p[6]);
+      parityBlocks = Number(p[7]);
+      requiredBlocks = Number(p[8]);
+      compressed = p[9] === '1';
+      originalSize = Number(p[10]) || 0;
+      payload = p.slice(11).join('|');
+    } else if (p.length >= 10 && Number.isInteger(Number(p[6])) && Number.isInteger(Number(p[7])) && Number.isInteger(Number(p[8]))) {
+      dataBlocks = Number(p[6]);
+      parityBlocks = Number(p[7]);
+      requiredBlocks = Number(p[8]);
+      payload = p.slice(9).join('|');
+    } else if (p.length >= 9 && Number.isInteger(Number(p[6])) && Number.isInteger(Number(p[7]))) {
+      dataBlocks = Number(p[6]);
+      parityBlocks = Number(p[7]);
+      payload = p.slice(8).join('|');
+    }
 
     if (!Number.isInteger(index) || !Number.isInteger(total)) return null;
     if (index < 0 || total <= 0 || index >= total) return null;
 
-    return { fileId, index, total, mime, filename, payload };
+    return { fileId, index, total, mime, filename, payload, dataBlocks, parityBlocks, requiredBlocks, compressed, originalSize };
   }
 
   function updateUI(frame) {
@@ -212,29 +393,54 @@
     }
   }
 
-  function assembleIfComplete() {
-    if (!meta || chunks.size !== meta.total) return;
+  async function maybeDecompressBytes(bytes, compressed) {
+    if (!compressed) return bytes;
+    if (!('DecompressionStream' in window)) {
+      throw new Error('Tarayıcı gzip ayrıştırmayı desteklemiyor.');
+    }
+
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  async function assembleIfComplete() {
+    if (!meta || completed) return;
+
+    const required = meta.dataBlocks || meta.total;
+    if (chunks.size < required) return;
 
     try {
-      const byteChunks = [];
-      let totalBytes = 0;
+      let merged;
+      if (meta.dataBlocks && meta.parityBlocks) {
+        merged = reconstructDataBlocks(chunks, meta.total, meta.dataBlocks, meta.parityBlocks);
+        if (!merged) return;
+      } else {
+        if (chunks.size !== meta.total) return;
+        const byteChunks = [];
+        let totalBytes = 0;
 
-      for (let i=0; i<meta.total; i++) {
-        const part = chunks.get(i);
-        if (!part) return;
-        const bytes = b64ToBytes(part);
-        byteChunks.push(bytes);
-        totalBytes += bytes.length;
+        for (let i=0; i<meta.total; i++) {
+          const part = chunks.get(i);
+          if (!part) return;
+          const bytes = b64ToBytes(part);
+          byteChunks.push(bytes);
+          totalBytes += bytes.length;
+        }
+
+        merged = new Uint8Array(totalBytes);
+        let off = 0;
+        for (const arr of byteChunks) {
+          merged.set(arr, off);
+          off += arr.length;
+        }
       }
 
-      const merged = new Uint8Array(totalBytes);
-      let off = 0;
-      for (const arr of byteChunks) {
-        merged.set(arr, off);
-        off += arr.length;
+      if (meta.compressed) {
+        merged = await maybeDecompressBytes(merged, true);
       }
+      if (meta.originalSize > 0) merged = merged.slice(0, meta.originalSize);
 
-      const blob = new Blob([merged], { type:meta.mime });
+      const blob = new Blob([merged], { type: meta.mime.replace(/;.*$/, '') || 'application/octet-stream' });
       const url = URL.createObjectURL(blob);
 
       downloadArea.innerHTML = '';
@@ -242,31 +448,212 @@
       a.className = 'download';
       a.href = url;
       a.download = meta.filename;
-      a.textContent = `Dosyayı indir: ${meta.filename} (${totalBytes.toLocaleString()} byte)`;
+      a.textContent = `Dosyayı indir: ${meta.filename} (${merged.length.toLocaleString()} byte)`;
       downloadArea.appendChild(a);
+      downloadUrl = url;
+      completed = true;
 
-      setStatus('Tüm parçalar alındı. Dosya hazır.', 'ok');
+      setStatus(meta.dataBlocks && meta.parityBlocks ? 'Yeterli parça alındı. Reed-Solomon benzeri onarım ile dosya hazır.' : 'Tüm parçalar alındı. Dosya hazır.', 'ok');
     } catch (err) {
       setStatus('Birleştirme hatası: ' + err.message, 'err');
     }
   }
 
+  function noteAcceptedFrame() {
+    rateCounter++;
+    const now = performance.now();
+    if (now - lastRateTs >= 1000) {
+      rateEl.textContent = `${rateCounter}/s`;
+      rateCounter = 0;
+      lastRateTs = now;
+    }
+  }
+
+  function validateV2Metadata(value) {
+    if (!value || value.v !== 2) return null;
+    const integerFields = ['size', 'storedSize', 'chunkSize', 'groupSize', 'dataBlocks', 'groupCount', 'totalBlocks'];
+    if (!integerFields.every(key => Number.isSafeInteger(value[key]) && value[key] >= 0)) return null;
+    if (value.size > 1024 * 1024 * 1024 || value.storedSize <= 0 || value.storedSize > 1024 * 1024 * 1024) return null;
+    if (![240, 480, 720, 960].includes(value.chunkSize)) return null;
+    if (value.groupSize < 1 || value.groupSize > 128) return null;
+    if (!(value.parityRate >= 0.05 && value.parityRate <= 0.5)) return null;
+    if (value.dataBlocks !== Math.ceil(value.storedSize / value.chunkSize)) return null;
+    if (value.groupCount !== Math.ceil(value.dataBlocks / value.groupSize)) return null;
+    let expectedTotal = 0;
+    for (let group = 0; group < value.groupCount; group++) {
+      const dataCount = Math.min(value.groupSize, value.dataBlocks - group * value.groupSize);
+      const parityCount = Math.max(2, Math.ceil(dataCount * value.parityRate));
+      if (dataCount + parityCount > 255) return null;
+      expectedTotal += dataCount + parityCount;
+    }
+    if (value.totalBlocks !== expectedTotal) return null;
+    if (typeof value.name !== 'string' || !value.name.length || value.name.length > 240) return null;
+    if (typeof value.mime !== 'string' || value.mime.length > 200) return null;
+    if (typeof value.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(value.sha256)) return null;
+    return {
+      ...value,
+      name: value.name.replace(/[\\/:*?"<>|\r\n]/g, '_'),
+      compressed: value.compressed === true
+    };
+  }
+
+  function v2GroupShape(groupIndex) {
+    const dataCount = Math.min(v2Meta.groupSize, v2Meta.dataBlocks - groupIndex * v2Meta.groupSize);
+    return { dataCount, parityCount: Math.max(2, Math.ceil(dataCount * v2Meta.parityRate)) };
+  }
+
+  async function assembleV2IfComplete() {
+    if (completed || !v2Meta || v2Recovered.size !== v2Meta.groupCount) return;
+    try {
+      const stored = new Uint8Array(v2Meta.storedSize);
+      let offset = 0;
+      for (let group = 0; group < v2Meta.groupCount; group++) {
+        const blocks = v2Recovered.get(group);
+        if (!blocks) return;
+        for (const block of blocks) {
+          const remaining = stored.length - offset;
+          if (remaining <= 0) break;
+          const length = Math.min(block.length, remaining);
+          stored.set(block.subarray(0, length), offset);
+          offset += length;
+        }
+      }
+      if (offset !== stored.length) throw new Error('Aktarım uzunluğu üstveriyle eşleşmiyor.');
+
+      let output = await maybeDecompressBytes(stored, v2Meta.compressed);
+      if (output.length !== v2Meta.size) throw new Error(`Dosya uzunluğu hatalı (${output.length}/${v2Meta.size}).`);
+      const digest = await crypto.subtle.digest('SHA-256', output);
+      const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+      if (sha256 !== v2Meta.sha256) throw new Error('SHA-256 bütünlük doğrulaması başarısız.');
+
+      const blob = new Blob([output], { type: v2Meta.mime.replace(/;.*$/, '') || 'application/octet-stream' });
+      downloadUrl = URL.createObjectURL(blob);
+      downloadArea.innerHTML = '';
+      const link = document.createElement('a');
+      link.className = 'download';
+      link.href = downloadUrl;
+      link.download = v2Meta.name;
+      link.textContent = `Dosyayı indir: ${v2Meta.name} (${output.length.toLocaleString('tr-TR')} bayt)`;
+      downloadArea.appendChild(link);
+      completed = true;
+      progress.value = 100;
+      setStatus('Dosya kurtarıldı; uzunluk, kare CRC’leri ve SHA-256 özeti doğrulandı.', 'ok');
+    } catch (error) {
+      setStatus('Birleştirme hatası: ' + error.message, 'err');
+    }
+  }
+
+  function recoverV2Group(groupIndex) {
+    if (completed || v2Recovered.has(groupIndex) || v2Recovering.has(groupIndex)) return;
+    const symbols = v2Groups.get(groupIndex);
+    const shape = v2GroupShape(groupIndex);
+    if (!symbols || symbols.size < shape.dataCount) return;
+    v2Recovering.add(groupIndex);
+    const sessionId = v2FileId;
+
+    setTimeout(() => {
+      if (!v2Meta || v2FileId !== sessionId) return;
+      try {
+        const recovered = Optx2.recoverGroup(symbols, shape.dataCount, shape.parityCount, v2Meta.chunkSize);
+        if (recovered) {
+          v2Recovered.set(groupIndex, recovered);
+          progress.value = (v2Recovered.size / v2Meta.groupCount) * 100;
+          partsEl.textContent = `${v2Received} kare · ${v2Recovered.size}/${v2Meta.groupCount} grup`;
+          assembleV2IfComplete();
+        }
+      } catch (error) {
+        setStatus('Kurtarma bloğu işlenemedi: ' + error.message, 'err');
+      } finally {
+        v2Recovering.delete(groupIndex);
+      }
+    }, 0);
+  }
+
+  function acceptV2Data(frame) {
+    if (!v2Meta) {
+      if (!v2FileId) v2FileId = frame.fileId;
+      if (frame.fileId === v2FileId && v2Pending.length < 512 && !v2Pending.some(item => item.groupIndex === frame.groupIndex && item.symbolIndex === frame.symbolIndex)) {
+        v2Pending.push(frame);
+        setStatus('Veri karesi alındı; oturum üstverisi bekleniyor.', 'warn');
+      }
+      return;
+    }
+    if (frame.fileId !== v2FileId || completed) return;
+    if (frame.groupIndex < 0 || frame.groupIndex >= v2Meta.groupCount) return;
+    const shape = v2GroupShape(frame.groupIndex);
+    if (frame.symbolIndex < 0 || frame.symbolIndex >= shape.dataCount + shape.parityCount) return;
+    if (frame.payload.length !== v2Meta.chunkSize) return;
+
+    if (!v2Groups.has(frame.groupIndex)) v2Groups.set(frame.groupIndex, new Map());
+    const symbols = v2Groups.get(frame.groupIndex);
+    if (symbols.has(frame.symbolIndex)) return;
+    symbols.set(frame.symbolIndex, frame.payload);
+    v2Received++;
+    fileIdEl.textContent = frame.fileId;
+    partsEl.textContent = `${v2Received} kare · ${v2Recovered.size}/${v2Meta.groupCount} grup`;
+    lastIndexEl.textContent = `${frame.groupIndex}:${frame.symbolIndex}`;
+    noteAcceptedFrame();
+    recoverV2Group(frame.groupIndex);
+  }
+
+  function acceptV2Meta(frame) {
+    if (transferMode === 'legacy') return;
+    const checked = validateV2Metadata(frame.metadata);
+    if (!checked) {
+      setStatus('Geçersiz veya desteklenmeyen OPTX2 üstverisi.', 'err');
+      return;
+    }
+    if (v2Meta && frame.fileId !== v2FileId) return;
+    if (!v2Meta) {
+      transferMode = 'v2';
+      v2Meta = checked;
+      v2FileId = frame.fileId;
+      fileIdEl.textContent = frame.fileId;
+      setStatus(`${checked.name} alınıyor; ${checked.groupCount} kurtarma grubu bekleniyor.`, 'ok');
+      const pending = v2Pending;
+      v2Pending = [];
+      for (const item of pending) acceptV2Data(item);
+    }
+  }
+
   function acceptRaw(raw) {
     lastRawEl.textContent = raw;
+    if (raw.startsWith('O2M')) {
+      const frame = Optx2 && Optx2.parseMetaFrame(raw);
+      if (frame) acceptV2Meta(frame);
+      return;
+    }
+    if (raw.startsWith('O2D')) {
+      const frame = Optx2 && Optx2.parseDataFrame(raw);
+      if (frame && transferMode !== 'legacy') acceptV2Data(frame);
+      return;
+    }
     const f = parseFrame(raw);
     if (!f) return;
+    if (transferMode === 'v2') return;
+    transferMode = 'legacy';
 
     if (!meta) {
       meta = {
         fileId:f.fileId,
         total:f.total,
         mime:f.mime,
-        filename:f.filename
+        filename:f.filename,
+        dataBlocks: f.dataBlocks,
+        parityBlocks: f.parityBlocks,
+        requiredBlocks: f.requiredBlocks,
+        compressed: f.compressed,
+        originalSize: f.originalSize
       };
     }
 
     if (f.fileId !== meta.fileId) return;
     if (f.total !== meta.total) return;
+    if (f.dataBlocks && meta.dataBlocks && f.dataBlocks !== meta.dataBlocks) return;
+    if (f.parityBlocks && meta.parityBlocks && f.parityBlocks !== meta.parityBlocks) return;
+    if (f.requiredBlocks && meta.requiredBlocks && f.requiredBlocks !== meta.requiredBlocks) return;
+    if (typeof f.compressed === 'boolean' && typeof meta.compressed === 'boolean' && f.compressed !== meta.compressed) return;
+    if (meta.originalSize && f.originalSize && f.originalSize !== meta.originalSize) return;
 
     if (!chunks.has(f.index)) {
       chunks.set(f.index, f.payload);
@@ -286,12 +673,12 @@
           for (const code of codes) {
             if (code.rawValue) acceptRaw(code.rawValue);
           }
-        } else if (timestamp - lastFallbackScan >= 100) {
+        } else if (timestamp - lastFallbackScan >= 66) {
           lastFallbackScan = timestamp;
 
           const sourceWidth = video.videoWidth;
           const sourceHeight = video.videoHeight;
-          const maxWidth = 1280;
+          const maxWidth = 960;
           const scale = Math.min(1, maxWidth / sourceWidth);
 
           scanCanvas.width = Math.round(sourceWidth * scale);

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<meta name="description" content="Dosyaları ve metni OPTX1 biçiminde QR karelerine dönüştürür." />
+<meta name="description" content="Dosyaları ve metni hızlı ve kayıp toleranslı OPTX2 QR karelerine dönüştürür." />
 <title>Optik Veri Gönderici</title>
 <style>
   :root {
@@ -108,19 +108,19 @@
         <div class="field">
           <label class="label" for="chunkSize">Parça boyutu</label>
           <select id="chunkSize">
-            <option value="160">160 bayt · güçlü okuma</option>
-            <option value="240" selected>240 bayt · dengeli</option>
-            <option value="360">360 bayt · hızlı</option>
-            <option value="480">480 bayt · yoğun</option>
+            <option value="240">240 bayt · güçlü okuma</option>
+            <option value="480">480 bayt · uyumlu</option>
+            <option value="720" selected>720 bayt · dengeli</option>
+            <option value="960">960 bayt · hızlı</option>
           </select>
         </div>
         <div class="field">
           <label class="label" for="fps">Gösterim hızı</label>
           <select id="fps">
-            <option value="2">2 kare/sn</option>
-            <option value="3">3 kare/sn</option>
-            <option value="4" selected>4 kare/sn</option>
-            <option value="5">5 kare/sn</option>
+            <option value="4">4 kare/sn</option>
+            <option value="6" selected>6 kare/sn</option>
+            <option value="8">8 kare/sn</option>
+            <option value="10">10 kare/sn</option>
           </select>
         </div>
       </div>
@@ -133,7 +133,7 @@
 
     <section id="qrCard" class="card qr-card" aria-labelledby="streamTitle">
       <div class="qr-top">
-        <div><div class="eyebrow">OPTX1 akışı</div><h2 id="streamTitle" style="font-size:1rem;margin:4px 0 0">QR önizleme</h2></div>
+        <div><div class="eyebrow">OPTX2 akışı</div><h2 id="streamTitle" style="font-size:1rem;margin:4px 0 0">QR önizleme</h2></div>
         <div id="counter" class="counter">0 / 0</div>
       </div>
       <div id="qrStage" class="qr-stage">
@@ -160,6 +160,7 @@
 </div>
 
 <script src="qrcode.min.js"></script>
+<script src="optx.js"></script>
 <script>
 (() => {
   const textInput = document.getElementById('textInput');
@@ -188,6 +189,7 @@
   let frames = [];
   let currentIndex = 0;
   let timer = null;
+  let generationToken = 0;
 
   function setStatus(message, type = '') {
     statusEl.textContent = message;
@@ -197,7 +199,7 @@
   function makeFileId() {
     const random = new Uint32Array(2);
     crypto.getRandomValues(random);
-    return Date.now().toString(36) + '-' + Array.from(random, n => n.toString(36)).join('');
+    return Array.from(random, n => n.toString(36).toUpperCase().padStart(7, '0')).join('').slice(0, 12);
   }
 
   function safeFilename(value) {
@@ -205,24 +207,69 @@
     return cleaned || 'metin.txt';
   }
 
-  function bytesToBase64(bytes) {
-    let binary = '';
-    const step = 0x8000;
-    for (let i = 0; i < bytes.length; i += step) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + step));
+  function getCodingProfile(fileSize, requestedChunkSize = 720) {
+    const allowedSizes = [240, 480, 720, 960];
+    const chunkSize = allowedSizes.includes(Number(requestedChunkSize)) ? Number(requestedChunkSize) : 720;
+    const groupSize = 64;
+    const parityRate = 0.16;
+    const dataBlocks = Math.ceil(fileSize / chunkSize);
+    const groupCount = Math.ceil(dataBlocks / groupSize);
+    let totalBlocks = 0;
+    for (let group = 0; group < groupCount; group++) {
+      const groupData = Math.min(groupSize, dataBlocks - group * groupSize);
+      totalBlocks += groupData + Math.max(2, Math.ceil(groupData * parityRate));
     }
-    return btoa(binary);
+    return { chunkSize, groupSize, parityRate, dataBlocks, groupCount, totalBlocks };
+  }
+
+  async function compressIfHelpful(bytes, mimeType) {
+    if (!bytes || bytes.length < 12 * 1024) {
+      return { bytes, compressed: false, originalLength: bytes.length };
+    }
+
+    const shouldTryCompression = !!window.CompressionStream && (
+      mimeType.startsWith('text/') ||
+      mimeType.includes('json') ||
+      mimeType.includes('xml') ||
+      mimeType.includes('csv') ||
+      mimeType.includes('excel') ||
+      mimeType.includes('sheet') ||
+      mimeType.includes('octet-stream') ||
+      mimeType.includes('pdf')
+    );
+
+    if (!shouldTryCompression) {
+      return { bytes, compressed: false, originalLength: bytes.length };
+    }
+
+    try {
+      const compressed = await new Response(
+        new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))
+      ).arrayBuffer();
+
+      if (compressed.byteLength < bytes.length * 0.9) {
+        return {
+          bytes: new Uint8Array(compressed),
+          compressed: true,
+          originalLength: bytes.length
+        };
+      }
+    } catch (error) {
+      console.warn('Sıkıştırma denendi ama başarısız oldu:', error);
+    }
+
+    return { bytes, compressed: false, originalLength: bytes.length };
   }
 
   function drawQr(raw) {
     const qr = qrcode(0, 'M');
-    qr.addData(raw, 'Byte');
+    qr.addData(raw, raw.startsWith('O2') ? 'Alphanumeric' : 'Byte');
     qr.make();
 
     const modules = qr.getModuleCount();
     const quiet = 4;
     const target = Math.min(820, Math.max(360, window.innerWidth < 500 ? window.innerWidth - 64 : 660));
-    const cell = Math.max(3, Math.floor(target / (modules + quiet * 2)));
+    const cell = Math.max(2, Math.floor(target / (modules + quiet * 2)));
     const size = (modules + quiet * 2) * cell;
     const ctx = qrCanvas.getContext('2d');
 
@@ -276,6 +323,8 @@
 
   async function generate() {
     pause();
+    const jobToken = ++generationToken;
+    generateBtn.disabled = true;
 
     const selectedFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
     const text = textInput.value;
@@ -284,8 +333,14 @@
     let filename = safeFilename(filenameInput.value);
 
     if (selectedFile) {
-      const fileBytes = new Uint8Array(await selectedFile.arrayBuffer());
-      bytes = fileBytes;
+      try {
+        bytes = new Uint8Array(await selectedFile.arrayBuffer());
+      } catch (error) {
+        setStatus('Dosya okunamadı: ' + error.message, 'err');
+        generateBtn.disabled = false;
+        return;
+      }
+      if (jobToken !== generationToken) return;
       mimeType = selectedFile.type || 'application/octet-stream';
       filename = safeFilename(selectedFile.name || filenameInput.value || 'gonderilen_dosya.bin');
       filenameInput.value = filename;
@@ -298,41 +353,83 @@
     if (!bytes.length) {
       setStatus(selectedFile ? 'Seçilen dosya boş. Lütfen başka bir dosya seçin.' : 'Önce gönderilecek metni girin.', 'err');
       if (!selectedFile) textInput.focus();
+      generateBtn.disabled = false;
       return;
     }
-    if (typeof qrcode !== 'function') {
+    if (typeof qrcode !== 'function' || !window.Optx2) {
       setStatus('QR üretim kütüphanesi yüklenemedi.', 'err');
+      generateBtn.disabled = false;
       return;
     }
 
-    let chunkSize = Number(chunkSizeInput.value);
-    if (bytes.length >= 100_000 && chunkSize > 160) {
-      chunkSize = 160;
-      chunkSizeInput.value = String(chunkSize);
-      setStatus('Büyük dosya için QR parça boyutu otomatik küçültüldü; kamera okuması daha güvenilir olur.', 'ok');
+    try {
+      setStatus('Dosya hazırlanıyor, bütünlük özeti ve kurtarma blokları hesaplanıyor…');
+      const transfer = await compressIfHelpful(bytes, mimeType);
+      if (jobToken !== generationToken) return;
+      const profile = getCodingProfile(transfer.bytes.length, Number(chunkSizeInput.value));
+      const fileId = makeFileId();
+      const hashBuffer = await crypto.subtle.digest('SHA-256', bytes);
+      if (jobToken !== generationToken) return;
+      const sha256 = Array.from(new Uint8Array(hashBuffer), byte => byte.toString(16).padStart(2, '0')).join('');
+      const metadata = {
+        v: 2,
+        name: filename,
+        mime: mimeType,
+        size: transfer.originalLength,
+        storedSize: transfer.bytes.length,
+        compressed: transfer.compressed,
+        chunkSize: profile.chunkSize,
+        groupSize: profile.groupSize,
+        parityRate: profile.parityRate,
+        dataBlocks: profile.dataBlocks,
+        groupCount: profile.groupCount,
+        totalBlocks: profile.totalBlocks,
+        sha256
+      };
+      const metaRaw = Optx2.makeMetaFrame(fileId, metadata);
+      const dataFrames = [];
+
+      for (let group = 0; group < profile.groupCount; group++) {
+        const groupData = Math.min(profile.groupSize, profile.dataBlocks - group * profile.groupSize);
+        const parityCount = Math.max(2, Math.ceil(groupData * profile.parityRate));
+        const offset = group * profile.groupSize * profile.chunkSize;
+        const symbols = Optx2.encodeGroup(transfer.bytes, offset, groupData, parityCount, profile.chunkSize);
+        for (let symbol = 0; symbol < symbols.length; symbol++) {
+          dataFrames.push({ raw: Optx2.makeDataFrame(fileId, group, symbol, symbols[symbol]) });
+        }
+        if (group % 4 === 3) {
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          if (jobToken !== generationToken) return;
+        }
+      }
+
+      // Oturuma aktarımın ortasında katılan alıcı da üstveriyi en geç 32 karede görür.
+      frames = [];
+      for (let index = 0; index < dataFrames.length; index++) {
+        if (index % 32 === 0) frames.push({ raw: metaRaw, metadata: true });
+        frames.push(dataFrames[index]);
+      }
+
+      currentIndex = 0;
+      fileIdEl.textContent = fileId;
+      totalBytesEl.textContent = `${transfer.originalLength.toLocaleString('tr-TR')} bayt${transfer.compressed ? ` · ${transfer.bytes.length.toLocaleString('tr-TR')} bayta sıkıştırıldı` : ''}`;
+      totalPartsEl.textContent = `${profile.totalBlocks.toLocaleString('tr-TR')} + üstveri`;
+      prevBtn.disabled = nextBtn.disabled = playBtn.disabled = fullscreenBtn.disabled = false;
+      showFrame(0);
+      setStatus(`${profile.groupCount} bağımsız grupta ${profile.totalBlocks} veri/kurtarma karesi hazır. Her grup yaklaşık %16 kare kaybını tolere eder.`, 'ok');
+    } catch (error) {
+      frames = [];
+      qrCanvas.hidden = true;
+      emptyEl.hidden = false;
+      prevBtn.disabled = nextBtn.disabled = playBtn.disabled = fullscreenBtn.disabled = true;
+      setStatus('Akış oluşturulamadı: ' + error.message, 'err');
+    } finally {
+      if (jobToken === generationToken) generateBtn.disabled = false;
     }
-
-    const total = Math.ceil(bytes.length / chunkSize);
-    const fileId = makeFileId();
-    frames = [];
-
-    for (let index = 0; index < total; index++) {
-      const payload = bytesToBase64(bytes.subarray(index * chunkSize, (index + 1) * chunkSize));
-      frames.push({
-        raw: `OPTX1|${fileId}|${index}|${total}|${mimeType}|${filename}|${payload}`
-      });
-    }
-
-    currentIndex = 0;
-    fileIdEl.textContent = fileId;
-    totalBytesEl.textContent = `${bytes.length.toLocaleString('tr-TR')} bayt`;
-    totalPartsEl.textContent = total.toLocaleString('tr-TR');
-    prevBtn.disabled = nextBtn.disabled = playBtn.disabled = fullscreenBtn.disabled = false;
-    showFrame(0);
-    setStatus(`${total} QR karesi hazır. Alıcı kamerayı ekrana doğrultunca Oynat'a basın.`, 'ok');
   }
 
   function reset() {
+    generationToken++;
     pause();
     frames = [];
     currentIndex = 0;
@@ -348,6 +445,7 @@
     totalPartsEl.textContent = '0';
     rawEl.textContent = '—';
     prevBtn.disabled = nextBtn.disabled = playBtn.disabled = fullscreenBtn.disabled = true;
+    generateBtn.disabled = false;
     setStatus('Dosya seçin veya metni girip QR akışını oluşturun.');
     textInput.focus();
   }
@@ -398,33 +496,33 @@
       Promise.resolve(modelContext.registerTool({
         name:'prepare_optical_qr_stream',
         title:'Optik QR akışı hazırla',
-        description:'Verilen dosyayı veya metni OPTX1 biçimindeki sıralı QR karelerine dönüştürür ve ilk kareyi görünür hale getirir. Oynatmayı başlatmaz.',
+        description:'Verilen metni OPTX2 biçimindeki hızlı, kayıp toleranslı QR karelerine dönüştürür ve ilk kareyi görünür hale getirir. Oynatmayı başlatmaz.',
         inputSchema:{
           type:'object',
           properties:{
             text:{ type:'string', minLength:1, description:'QR kareleriyle gönderilecek metin. Dosya gönderimi için kullanılmaz.' },
             filename:{ type:'string', minLength:1, maxLength:80, default:'gonderilen_dosya.bin' },
-            chunkSize:{ type:'integer', enum:[160,240,360,480], default:240 },
-            fps:{ type:'integer', enum:[2,3,4,5], default:4 }
+            chunkSize:{ type:'integer', enum:[240,480,720,960], default:720 },
+            fps:{ type:'integer', enum:[4,6,8,10], default:6 }
           },
           required:[],
           additionalProperties:false
         },
         annotations:{ readOnlyHint:false, untrustedContentHint:false },
-        execute(input) {
+        async execute(input) {
           if (!input || typeof input.text !== 'string' || !input.text.length) {
             throw new Error('text alanı boş olamaz.');
           }
-          const chunkSize = input.chunkSize === undefined ? 240 : Number(input.chunkSize);
-          const fps = input.fps === undefined ? 4 : Number(input.fps);
-          if (![160,240,360,480].includes(chunkSize)) throw new Error('Geçersiz chunkSize.');
-          if (![2,3,4,5].includes(fps)) throw new Error('Geçersiz fps.');
+          const chunkSize = input.chunkSize === undefined ? 720 : Number(input.chunkSize);
+          const fps = input.fps === undefined ? 6 : Number(input.fps);
+          if (![240,480,720,960].includes(chunkSize)) throw new Error('Geçersiz chunkSize.');
+          if (![4,6,8,10].includes(fps)) throw new Error('Geçersiz fps.');
           textInput.value = input.text;
           filenameInput.value = typeof input.filename === 'string' ? input.filename : 'metin.txt';
           chunkSizeInput.value = String(chunkSize);
           fpsInput.value = String(fps);
           byteCountEl.textContent = new TextEncoder().encode(input.text).length.toLocaleString('tr-TR');
-          generate();
+          await generate();
           if (!frames.length) throw new Error(statusEl.textContent);
           return {
             fileId:fileIdEl.textContent,
