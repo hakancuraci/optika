@@ -215,7 +215,7 @@
   }
 
   function drawQr(raw) {
-    const qr = qrcode(0, 'L');
+    const qr = qrcode(0, 'M');
     qr.addData(raw, 'Byte');
     qr.make();
 
@@ -305,7 +305,13 @@
       return;
     }
 
-    const chunkSize = Number(chunkSizeInput.value);
+    let chunkSize = Number(chunkSizeInput.value);
+    if (bytes.length >= 100_000 && chunkSize > 160) {
+      chunkSize = 160;
+      chunkSizeInput.value = String(chunkSize);
+      setStatus('Büyük dosya için QR parça boyutu otomatik küçültüldü; kamera okuması daha güvenilir olur.', 'ok');
+    }
+
     const total = Math.ceil(bytes.length / chunkSize);
     const fileId = makeFileId();
     frames = [];
